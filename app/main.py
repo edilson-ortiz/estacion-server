@@ -1,7 +1,6 @@
 from fastapi import FastAPI
 #from app import models
 from app.database import get_connection
-from app.mqtt_client import start_mqtt
 from app.routers import sensors
 
 app = FastAPI(title="Estación Meteorológica API")
@@ -13,9 +12,6 @@ cursor = conn.cursor()
 conn.commit()
 cursor.close()
 conn.close()
-
-# Iniciar cliente MQTT
-start_mqtt()
 
 # Incluir rutas HTTP
 app.include_router(sensors.router)

@@ -63,7 +63,7 @@ def get_daily_summary(sensor_id: str):
             MAX(humedad) AS humedad
         FROM datos_sensores
         WHERE sensor_id = %s
-          AND fecha >= CURRENT_DATE - INTERVAL '10 days'
+          AND fecha >= CURRENT_DATE - INTERVAL '30 days'
         GROUP BY DATE(fecha)
         ORDER BY dia DESC
     """, (sensor_id,))
@@ -83,7 +83,7 @@ def get_daily_summary(sensor_id: str):
             })
         return resumen
     
-    return {"message": f"No hay datos de los últimos 10 días para el sensor {sensor_id}"}
+    return {"message": f"No hay datos de los últimos 30 días para el sensor {sensor_id}"}
 
 def get_latest_record(sensor_id: str):
     conn = get_connection()
@@ -108,8 +108,27 @@ def get_latest_record(sensor_id: str):
             "temperatura": float(row[2]),
             "humedad": float(row[3]),
             "lluvia": float(row[4])/kmilimetro,
-            "fecha": row[5].isoformat(sep=' ') # fecha y hora como 'YYYY-MM-DD HH:MM:SS'
+            "fecha": row[5].isoformat(sep=' '), # fecha y hora como 'YYYY-MM-DD HH:MM:SS'
+            "estado":estado_sensor( row[1],10)
         }
         return record
     
     return {"message": f"No hay registros para el sensor {sensor_id}"}
+
+def estado_sensor(sensor_id: str, minutos: int) -> bool:
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT EXISTS (
+            SELECT 1
+            FROM datos_sensores d
+            WHERE d.sensor_id = %s
+              AND d.fecha > NOW() - make_interval(mins := %s)
+        )
+    """, (sensor_id, minutos))
+
+    existe = cursor.fetchone()[0]  # devuelve True o False
+    conn.close()
+
+    return existe
