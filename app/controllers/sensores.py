@@ -8,12 +8,12 @@ def get_daily_summary_controller(sensor_id: str) -> ResponseDTO[List[Dict]]:
     if resumen and isinstance(resumen, list):
         return ResponseDTO(
             success=True,
-            message=f"Datos de los últimos 10 días para el sensor {sensor_id}",
+            message=f"Datos de los últimos 30 días para el sensor {sensor_id}",
             data=resumen
         )
     return ResponseDTO(
         success=False,
-        message=f"No hay datos de los últimos 10 días para el sensor {sensor_id}",
+        message=f"No hay datos de los últimos 30 días para el sensor {sensor_id}",
         data=[]
     )
 
