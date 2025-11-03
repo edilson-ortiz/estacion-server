@@ -1,21 +1,15 @@
 from fastapi import FastAPI
-#from app import models
-from app.database import get_connection
-from app.routers import sensors
+from app.database import Base, engine
+from app.routers import weather_router
 
 app = FastAPI(title="Estación Meteorológica API")
 
-# Crear tabla si no existe
-conn = get_connection()
-cursor = conn.cursor()
-#cursor.execute(models.CREATE_TABLE_QUERY)
-conn.commit()
-cursor.close()
-conn.close()
+# Crear tablas si no existen
+Base.metadata.create_all(bind=engine)
 
 # Incluir rutas HTTP
-app.include_router(sensors.router)
+app.include_router(weather_router.router)
 
 @app.get("/")
 def home():
-    return {"status": "API funcionando con MQTT y PostgreSQL"}
+    return {"status": "API funcionando con PostgreSQL"}
