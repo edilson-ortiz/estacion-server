@@ -6,6 +6,8 @@ class Settings(BaseSettings):
     DB_HOST: str
     DB_PORT: int
     DB_NAME: str
+    CORREO: str
+    API_KEY_TOMORROW: str
 
     class Config:
         env_file = "app/.env"

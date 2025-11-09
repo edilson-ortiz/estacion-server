@@ -2,15 +2,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.services.weather_service import WeatherService
+from app.services.pronostico_service import PronosticoService
 from app.schemas.sensor_data import SensorDataResponse
 from app.schemas.response import ResponseDTO  # tu DTO ya existente
 from typing import List, Dict
 from datetime import datetime
 
-router = APIRouter(
-    prefix="/weather",
-    tags=["Weather Data"]
-)
+router = APIRouter()
 
 @router.get("/get/{sensor_id}", response_model=ResponseDTO[List[Dict]])
 def all_sensor_data(sensor_id: str, db: Session = Depends(get_db)):
@@ -19,7 +17,6 @@ def all_sensor_data(sensor_id: str, db: Session = Depends(get_db)):
     if resumen:
         return ResponseDTO(success=True, message=f"Datos de los últimos 30 días para {sensor_id}", data=resumen)
     return ResponseDTO(success=False, message=f"No hay datos de los últimos 30 días para {sensor_id}", data=[])
-
 
 @router.get("/latest/{sensor_id}", response_model=ResponseDTO[Dict])
 def latest_sensor_data(sensor_id: str, db: Session = Depends(get_db)):
@@ -52,6 +49,7 @@ def monthly_rain(sensor_id: str, year: int, month: int, db: Session = Depends(ge
         message=f"No hay registros para {sensor_id} en {year}-{month}",
         data=[]
     )
+
 @router.get("/year_rain/{sensor_id}/{year}", response_model=ResponseDTO[List[Dict]])
 def monthly_rain(sensor_id: str, year: int, db: Session = Depends(get_db)):
     service = WeatherService(db)
@@ -70,6 +68,7 @@ def monthly_rain(sensor_id: str, year: int, db: Session = Depends(get_db)):
 
 @router.get("/rain_sum/{sensor_id}/{start_date}/{end_date}", response_model=ResponseDTO[float])
 def rain_sum(sensor_id: str, start_date: str, end_date: str, db: Session = Depends(get_db)):
+
     """
     Devuelve la lluvia total acumulada entre dos fechas (inclusive).
     Ejemplo: /rain_sum/TR10/2025-10-01/2025-10-05
