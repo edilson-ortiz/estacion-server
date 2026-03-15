@@ -11,17 +11,17 @@ from datetime import datetime
 router = APIRouter()
 
 @router.get("/get/{sensor_id}", response_model=ResponseDTO[List[Dict]])
-def all_sensor_data(sensor_id: str, db: Session = Depends(get_db)):
+async def all_sensor_data(sensor_id: str, db: Session = Depends(get_db)):
     service = WeatherService(db)
-    resumen = service.get_daily_summary(sensor_id)
+    resumen = await service.get_daily_summary(sensor_id)
     if resumen:
         return ResponseDTO(success=True, message=f"Datos de los últimos 30 días para {sensor_id}", data=resumen)
     return ResponseDTO(success=False, message=f"No hay datos de los últimos 30 días para {sensor_id}", data=[])
 
 @router.get("/latest/{sensor_id}", response_model=ResponseDTO[Dict])
-def latest_sensor_data(sensor_id: str, db: Session = Depends(get_db)):
+async def latest_sensor_data(sensor_id: str, db: Session = Depends(get_db)):
     service = WeatherService(db)
-    registro = service.get_latest_record(sensor_id)
+    registro = await service.get_latest_record(sensor_id)
     if registro:
         return ResponseDTO(
             success=True, 
@@ -35,9 +35,9 @@ def latest_sensor_data(sensor_id: str, db: Session = Depends(get_db)):
     )
 
 @router.get("/monthly_rain/{sensor_id}/{year}/{month}", response_model=ResponseDTO[List[Dict]])
-def monthly_rain(sensor_id: str, year: int, month: int, db: Session = Depends(get_db)):
+async def monthly_rain(sensor_id: str, year: int, month: int, db: Session = Depends(get_db)):
     service = WeatherService(db)
-    registro = service.get_monthly_daily_rain(sensor_id, year, month)
+    registro = await service.get_monthly_daily_rain(sensor_id, year, month)
     if registro:
         return ResponseDTO(
             success=True,
@@ -51,9 +51,9 @@ def monthly_rain(sensor_id: str, year: int, month: int, db: Session = Depends(ge
     )
 
 @router.get("/year_rain/{sensor_id}/{year}", response_model=ResponseDTO[List[Dict]])
-def monthly_rain(sensor_id: str, year: int, db: Session = Depends(get_db)):
+async def year_rain(sensor_id: str, year: int, db: Session = Depends(get_db)):
     service = WeatherService(db)
-    registro = service.get_year_daily_rain(sensor_id, year)
+    registro = await service.get_year_daily_rain(sensor_id, year)
     if registro:
         return ResponseDTO(
             success=True,
@@ -67,7 +67,7 @@ def monthly_rain(sensor_id: str, year: int, db: Session = Depends(get_db)):
     )
 
 @router.get("/rain_sum/{sensor_id}/{start_date}/{end_date}", response_model=ResponseDTO[float])
-def rain_sum(sensor_id: str, start_date: str, end_date: str, db: Session = Depends(get_db)):
+async def rain_sum(sensor_id: str, start_date: str, end_date: str, db: Session = Depends(get_db)):
 
     """
     Devuelve la lluvia total acumulada entre dos fechas (inclusive).
@@ -79,7 +79,7 @@ def rain_sum(sensor_id: str, start_date: str, end_date: str, db: Session = Depen
         fecha_fin = datetime.strptime(end_date, "%Y-%m-%d")
 
         service = WeatherService(db)
-        suma_lluvia = service.get_rain_sum_between_dates(sensor_id, fecha_inicio, fecha_fin)
+        suma_lluvia = await service.get_rain_sum_between_dates(sensor_id, fecha_inicio, fecha_fin)
 
         return ResponseDTO(
             success=True,

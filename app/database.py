@@ -1,23 +1,38 @@
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, declarative_base
-from .config import settings
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy.orm import sessionmaker, DeclarativeBase
+from app.config import settings
 
-# URL desde el .env
-SQLALCHEMY_DATABASE_URL = settings.DATABASE_URL
+# ==============================
+# Engine ASYNC
+# ==============================
 
-# Motor de base de datos
-engine = create_engine(SQLALCHEMY_DATABASE_URL)
+engine = create_async_engine(
+    settings.DATABASE_URL,  # debe usar postgresql+asyncpg://
+    echo=False,
+    pool_pre_ping=True,
+)
 
-# Sesión de SQLAlchemy
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+# ==============================
+# Session Factory ASYNC
+# ==============================
 
-# Base de los modelos
-Base = declarative_base()
+AsyncSessionLocal = sessionmaker(
+    bind=engine,
+    class_=AsyncSession,
+    expire_on_commit=False,
+)
 
-# Dependencia para inyección en FastAPI
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+# ==============================
+# Base Declarativa (SQLAlchemy 2.0)
+# ==============================
+
+class Base(DeclarativeBase):
+    pass
+
+# ==============================
+# Dependency for FastAPI
+# ==============================
+
+async def get_db():
+    async with AsyncSessionLocal() as session:
+        yield session

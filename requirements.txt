@@ -6,3 +6,16 @@ sqlalchemy
 pydantic-settings
 requests
 httpx
+
+psycopg[binary]
+
+asyncpg
+python-jose[cryptography]
+python-dotenv
+alembic
+pydantic[email]
+
+passlib==1.7.4
+bcrypt==4.0.1
+
+python-multipart
