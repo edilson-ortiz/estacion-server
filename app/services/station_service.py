@@ -1,5 +1,3 @@
-
-from django import db
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.Estacion import Estacion
