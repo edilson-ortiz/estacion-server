@@ -40,14 +40,21 @@ class WeatherService:
             diferencia = now - record.fecha
             estacion_activa = diferencia <= timedelta(hours=1)
 
-            inicio_dia = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
+            # Medianoche en Bolivia = medianoche UTC+(-4) = 04:00 UTC
+            BOLIVIA_OFFSET = timedelta(hours=4)
+
+            now_bolivia = now - BOLIVIA_OFFSET
+            inicio_dia_bolivia = datetime(
+                now_bolivia.year, now_bolivia.month, now_bolivia.day,
+                tzinfo=timezone.utc
+            ) + BOLIVIA_OFFSET  # volver a UTC para comparar con la BD
 
             # lluvia hoy
             result = await self.db.execute(
                 select(func.sum(SensorData.lluvia))
                 .where(
                     SensorData.sensor_id == estacion.codigo,
-                    SensorData.fecha >= inicio_dia,
+                    SensorData.fecha >= inicio_dia_bolivia,
                     SensorData.fecha <= now
                 )
             )
@@ -56,8 +63,8 @@ class WeatherService:
             acumulado_hoy = acumulado_hoy / self.kmilimetro
 
             # lluvia ayer
-            ayer_inicio = inicio_dia - timedelta(days=1)
-            ayer_fin = inicio_dia
+            ayer_inicio = inicio_dia_bolivia - timedelta(days=1)
+            ayer_fin = inicio_dia_bolivia
 
             result = await self.db.execute(
                 select(func.sum(SensorData.lluvia))
@@ -188,17 +195,20 @@ class WeatherService:
 
     async def get_year_daily_rain(self, sensor_id: str, year: int):
 
+        # Misma conversión que el SQL: AT TIME ZONE 'UTC' AT TIME ZONE 'America/La_Paz'
+        fecha_bolivia = func.timezone('America/La_Paz', SensorData.fecha)
+
         result = await self.db.execute(
             select(
-                func.date(SensorData.fecha).label("dia"),
+                func.date(fecha_bolivia).label("dia"),
                 func.sum(SensorData.lluvia).label("suma_lluvia")
             )
             .where(
                 SensorData.sensor_id == sensor_id,
-                extract("year", SensorData.fecha) == year
+                extract("year", fecha_bolivia) == year
             )
-            .group_by(func.date(SensorData.fecha))
-            .order_by(func.date(SensorData.fecha))
+            .group_by(func.date(fecha_bolivia))
+            .order_by(func.date(fecha_bolivia))
         )
 
         rows = result.all()
@@ -206,7 +216,7 @@ class WeatherService:
         return [
             {
                 "fecha": r.dia.isoformat(),
-                "suma_lluvia": float(r.suma_lluvia)/self.kmilimetro
+                "suma_lluvia": float(r.suma_lluvia) / self.kmilimetro
             }
             for r in rows
         ]
