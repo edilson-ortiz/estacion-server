@@ -31,7 +31,31 @@ class Estacion(Base):
         back_populates="sensor",
         cascade="all, delete"
     )
+    calibraciones: Mapped[list["CalibracionPluviometro"]] = relationship(
+    "CalibracionPluviometro",
+    back_populates="estacion",
+    order_by="CalibracionPluviometro.vigente_desde"
+)
+class CalibracionPluviometro(Base):
+    __tablename__ = "calibracion_pluviometro"
 
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+
+    estacion_codigo: Mapped[str] = mapped_column(
+        ForeignKey("estacion.codigo"),
+        index=True,
+        nullable=False
+    )
+
+    factor_k: Mapped[float] = mapped_column(Float, nullable=False, default=0.1)
+    vigente_desde: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    motivo: Mapped[str] = mapped_column(String(255), nullable=True)
+    creado_por: Mapped[str] = mapped_column(String(100), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+    # relación con estación
+    estacion: Mapped["Estacion"] = relationship("Estacion", back_populates="calibraciones")
 
 class SensorData(Base):
     __tablename__ = "datos_sensores"
