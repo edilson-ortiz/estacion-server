@@ -1,9 +1,9 @@
-from django.http import response
+
 from fastapi import APIRouter,Query
 from app.services.pronostico_service import PronosticoService
 from app.services.ventuski_service import VentuskyService
 from typing import Optional
-from django.http import response
+
 
 router = APIRouter()
 
