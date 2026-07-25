@@ -43,7 +43,7 @@ async def get_pronostico(
 
     response["hourly"] = []
     response["daily"] = forecast["daily"]
-    response["tramo"] = forecast["tramo"]
+    response["tramos"] = forecast["tramos"]
 
     return response
 
