@@ -5,14 +5,44 @@ from typing import Optional
 
 router = APIRouter()
 
-
-@router.get("/pronostico_met")
-async def get_pronostico(lat: float, lon: float):
-    service = PronosticoService()
-    data = await service.get_met_no(lat,lon)
-    return data
-
 @router.get("/ventusky")
+async def get_pronostico(
+    lat: float = Query(..., description="Latitud"),
+    lon: float = Query(..., description="Longitud"),
+    type: Optional[str] = Query(None, description="Tipo de pronóstico: 'h', 'd', 't'")
+):
+    """
+    Devuelve pronóstico de Ventusky según parámetros:
+    - lat/lon: coordenadas
+    - type: 'h', 'd', 't'. 
+        - Si no se pasa, devuelve los 3 tipos juntos.
+        - Si se pasa un valor inválido, devuelve {}
+    """
+
+    service = VentuskyService(lat, lon)
+    await service.load_forecast()  # Llama a Ventusky una sola vez
+
+    response = {
+        "ubicacion": {
+            "lat": service.note.get("lat", lat),
+            "lon": service.note.get("lon", lon)
+        },
+        "unidades": {
+            "td": "C",
+            "sr": "mm",
+            "rp": "%",
+            "vd45": "°",
+            "vsd": "km/h",
+            "vg": "km/h"
+        }
+    }
+
+    response["tramo"] = await service.get_forecast_tramos()
+    
+
+    return response
+
+@router.get("/v1/ventusky")
 async def get_pronostico(
     lat: float = Query(..., description="Latitud"),
     lon: float = Query(..., description="Longitud"),

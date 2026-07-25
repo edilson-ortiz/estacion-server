@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from app.database import Base, engine
-from app.routers import auth, weather_router,pronostico_router,estacion
+from app.routers import auth, pronostico, weather_router,estacion
 from fastapi.exceptions import HTTPException
 from app.core.exception_handler import http_exception_handler
 
@@ -16,7 +16,7 @@ async def init_models():
 app.include_router(auth.router)
 app.include_router(estacion.router)
 app.include_router(weather_router.router,prefix="/weather", tags=["Weather Data"])
-app.include_router(pronostico_router.router, prefix="/pronostico", tags=["Weather Data"])
+app.include_router(pronostico.router, prefix="/pronostico", tags=["Pronóstico"])
 
 
 @app.get("/")

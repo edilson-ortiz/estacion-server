@@ -41,7 +41,7 @@ class UserResponse(BaseModel):
     is_active: bool
 
     class Config:
-        orm_mode = True  # Muy importante para poder pasar directamente objetos SQLAlchemy
+        from_attributes = True  # Muy importante para poder pasar directamente objetos SQLAlchemy
 
 class ResetPasswordRequest(BaseModel):
     new_password: str
