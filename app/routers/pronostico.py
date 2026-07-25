@@ -1,3 +1,4 @@
+from django.http import response
 from fastapi import APIRouter,Query
 from app.services.pronostico_service import PronosticoService
 from app.services.ventuski_service import VentuskyService
@@ -34,12 +35,14 @@ async def get_pronostico(
             "vd45": "°",
             "vsd": "km/h",
             "vg": "km/h"
-        }
+        },
+        
     }
+    forecast = await service.get_forecast_tramos()
+
     response["hourly"] = []
-    response["daily"] = []
-    response["tramo"] = await service.get_forecast_tramos()
-    
+    response["daily"] = forecast["daily"]
+    response["tramo"] = forecast["tramo"]
 
     return response
 
