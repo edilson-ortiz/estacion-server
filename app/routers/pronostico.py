@@ -36,7 +36,8 @@ async def get_pronostico(
             "vg": "km/h"
         }
     }
-
+    response["hourly"] = []
+    response["daily"] = []
     response["tramo"] = await service.get_forecast_tramos()
     
 
