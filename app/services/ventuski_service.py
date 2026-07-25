@@ -139,6 +139,20 @@ class VentuskyService:
     def get_forecast_hourly(self) -> List[Dict[str, Any]]:
         return self.organized_days
 
+    async def get_forecast_tramos(self) -> List[Dict[str, Any]]:
+        url = "https://pronostico.iagro360.xyz/forecast/tramos"
+
+        params = {
+            "lat": self.lat,
+            "lon": self.lon
+        }
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.get(url, params=params)
+            response.raise_for_status()
+        data = response.json()["data"]
+
+        return data
     # -----------------------------
     # 7️⃣ Pronóstico por día
     # -----------------------------
