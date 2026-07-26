@@ -246,6 +246,8 @@ class WeatherService:
             for dia, suma in sorted(resumen.items())
         ]
 
+    
+
     async def get_year_daily_rain(self, sensor_id: str, year: int):
         """
         Optimizado:
@@ -312,3 +314,175 @@ class WeatherService:
 
         total = sum(r["lluvia"] * self._factor_en_fecha(factores, r["fecha"]) for r in rows)
         return round(total, 2)
+    async def get_last_12h_rain(self, sensor_id: str):
+        """
+        Retorna:
+        - Precipitación acumulada de cada una de las últimas 12 horas (para gráfico)
+        - Acumulado de hoy y ayer
+        - Temperatura y humedad máxima/mínima del día (hora Bolivia)
+        """
+        now = datetime.now(timezone.utc)
+        desde = now - timedelta(hours=12)
+
+        result = await self.db.execute(
+            select(SensorData.fecha, SensorData.lluvia)
+            .where(
+                SensorData.sensor_id == sensor_id,
+                SensorData.fecha >= desde,
+                SensorData.fecha <= now
+            )
+            .order_by(SensorData.fecha)
+        )
+        rows = result.mappings().all()
+
+        # Una sola query de factores, reusada para todo el método
+        factores = await self._load_factores(sensor_id)
+
+        # ---------------- Buckets por hora (gráfico 12h) ----------------
+        hora_actual = now.replace(minute=0, second=0, microsecond=0)
+        buckets = {
+            hora_actual - timedelta(hours=i): 0.0
+            for i in range(11, -1, -1)
+        }
+
+        for r in rows:
+            fecha = r["fecha"]
+            if fecha.tzinfo is None:
+                fecha = fecha.replace(tzinfo=timezone.utc)
+
+            hora_bucket = fecha.replace(minute=0, second=0, microsecond=0)
+
+            if hora_bucket in buckets:
+                factor_k = self._factor_en_fecha(factores, fecha)
+                buckets[hora_bucket] += r["lluvia"] * factor_k
+
+        BOLIVIA_OFFSET = timedelta(hours=4)
+
+        # ---------------- Límites del día actual y de ayer, en hora Bolivia ----------------
+        now_bolivia = now - BOLIVIA_OFFSET
+        inicio_dia_bolivia = datetime(
+            now_bolivia.year, now_bolivia.month, now_bolivia.day,
+            tzinfo=timezone.utc
+        ) + BOLIVIA_OFFSET
+
+        ayer_inicio = inicio_dia_bolivia - timedelta(days=1)
+        ayer_fin = inicio_dia_bolivia
+
+        # ---------------- Acumulado de lluvia hoy ----------------
+        factor_k_hoy = self._factor_en_fecha(factores, now)
+        result = await self.db.execute(
+            select(func.sum(SensorData.lluvia))
+            .where(
+                SensorData.sensor_id == sensor_id,
+                SensorData.fecha >= inicio_dia_bolivia,
+                SensorData.fecha <= now
+            )
+        )
+        acumulado_hoy = (result.scalar() or 0.0) * factor_k_hoy
+
+        # ---------------- Acumulado de lluvia ayer ----------------
+        factor_k_ayer = self._factor_en_fecha(factores, ayer_inicio)
+        result = await self.db.execute(
+            select(func.sum(SensorData.lluvia))
+            .where(
+                SensorData.sensor_id == sensor_id,
+                SensorData.fecha >= ayer_inicio,
+                SensorData.fecha < ayer_fin
+            )
+        )
+        acumulado_ayer = (result.scalar() or 0.0) * factor_k_ayer
+
+        # ---------------- Temp y humedad max/min de HOY (mismo rango que la lluvia de hoy) ----------------
+        result_stats = await self.db.execute(
+            select(
+                func.max(SensorData.temperatura).label("temp_max"),
+                func.min(SensorData.temperatura).label("temp_min"),
+                func.max(SensorData.humedad).label("humedad_max"),
+                func.min(SensorData.humedad).label("humedad_min"),
+            )
+            .where(
+                SensorData.sensor_id == sensor_id,
+                SensorData.fecha >= inicio_dia_bolivia,
+                SensorData.fecha <= now
+            )
+        )
+        stats_dia = result_stats.one()
+
+        # ---------------- Armado del gráfico 12h ----------------
+        rain_12h = [
+            {
+                "hora": (hora - BOLIVIA_OFFSET).strftime("%H:00"),
+                "fecha_hora": (hora - BOLIVIA_OFFSET).isoformat(),
+                "lluvia": round(valor, 2)
+            }
+            for hora, valor in buckets.items()
+        ]
+
+        return {
+            "rain_12h": rain_12h,
+            "acumulado_hoy": round(acumulado_hoy, 2),
+            "acumulado_ayer": round(acumulado_ayer, 2),
+            "temp_max": stats_dia.temp_max,
+            "temp_min": stats_dia.temp_min,
+            "humedad_max": stats_dia.humedad_max,
+            "humedad_min": stats_dia.humedad_min,
+        }
+
+    async def get_latest_record_pro(self, sensor_id: str):
+    
+            result = await self.db.execute(
+                select(Estacion).where(Estacion.codigo == sensor_id)
+            )
+            estacion = result.scalar_one_or_none()
+    
+            if not estacion:
+                return None
+    
+            result = await self.db.execute(
+                select(SensorData)
+                .where(SensorData.sensor_id == estacion.codigo)
+                .order_by(SensorData.fecha.desc())
+                .limit(1)
+            )
+            record = result.scalar_one_or_none()
+    
+            if not record:
+                datos = None
+                estacion_activa = False
+            else:
+                now = datetime.now(timezone.utc)
+                diferencia = now - record.fecha
+                estacion_activa = diferencia <= timedelta(hours=1)
+    
+                # Una sola query para todos los factores
+                factores = await self._load_factores(sensor_id)
+    
+                BOLIVIA_OFFSET = timedelta(hours=4)
+                now_bolivia = now - BOLIVIA_OFFSET
+                inicio_dia_bolivia = datetime(
+                    now_bolivia.year, now_bolivia.month, now_bolivia.day,
+                    tzinfo=timezone.utc
+                ) + BOLIVIA_OFFSET
+    
+    
+                factor_k_record = self._factor_en_fecha(factores, record.fecha)
+    
+                datos = {
+                    "id": record.id,
+                    "temperatura": record.temperatura,
+                    "humedad": record.humedad,
+                    "punto_rocio": round(record.temperatura - ((100 - record.humedad) / 5), 1),
+                    "lluvia": round(record.lluvia * factor_k_record, 1),
+                    "velocidad_viento": record.velocidad_viento,
+                    "direccion_viento": record.direccion_viento,
+                    "direccion_viento_texto": self.direccion_viento_texto(record.direccion_viento),
+                    "rafaga_viento": record.rafaga_viento,
+                    "presion_barometrica": record.presion_barometrica,
+                    "estado": estacion_activa,
+                    "fecha": record.fecha.isoformat(sep=' ')
+                }
+    
+            return {
+                "datos": datos
+            }
+    
