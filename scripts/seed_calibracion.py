@@ -1,11 +1,18 @@
-# seed_calibracion.py
+"""Inserta el factor de calibración inicial del pluviómetro para una lista de estaciones.
+
+Uso (desde la raíz del proyecto):
+    python -m scripts.seed_calibracion
+"""
 import asyncio
 import selectors
+import sys
 from datetime import datetime, timezone
-from app.database import AsyncSessionLocal
-from app.models.Estacion import CalibracionPluviometro
-# ← Pon aquí los codigos EXACTOS como están en tu tabla estacion
-equipos = [
+
+from app.db.session import AsyncSessionLocal, engine
+from app.models import CalibracionPluviometro
+
+# Códigos EXACTOS como están en la tabla estacion
+EQUIPOS = [
     {"codigo": "EP057", "factor_k": 0.1},
     {"codigo": "EP999", "factor_k": 0.1},
     {"codigo": "EP003", "factor_k": 0.1},
@@ -20,20 +27,27 @@ equipos = [
     {"codigo": "EP061", "factor_k": 0.1},
     {"codigo": "EP062", "factor_k": 0.1},
     {"codigo": "EP063", "factor_k": 0.1},
-    {"codigo": "EP064", "factor_k": 0.1}
+    {"codigo": "EP064", "factor_k": 0.1},
 ]
+
 
 async def seed():
     async with AsyncSessionLocal() as db:
-        for e in equipos:
+        for e in EQUIPOS:
             db.add(CalibracionPluviometro(
                 estacion_codigo=e["codigo"],
                 factor_k=e["factor_k"],
                 vigente_desde=datetime(2000, 1, 1, tzinfo=timezone.utc),
-                motivo="factor inicial"
+                motivo="factor inicial",
             ))
         await db.commit()
-        print("✅ Calibraciones insertadas correctamente")
+    await engine.dispose()
+    print("✅ Calibraciones insertadas correctamente")
 
-# ← Fix para Windows (ProactorEventLoop no compatible con psycopg async)
-asyncio.run(seed(), loop_factory=lambda: asyncio.SelectorEventLoop(selectors.SelectSelector()))
+
+if __name__ == "__main__":
+    if sys.platform == "win32":
+        # psycopg async no es compatible con el ProactorEventLoop de Windows
+        asyncio.run(seed(), loop_factory=lambda: asyncio.SelectorEventLoop(selectors.SelectSelector()))
+    else:
+        asyncio.run(seed())
