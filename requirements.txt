@@ -1,21 +1,24 @@
-fastapi 
-uvicorn 
-paho-mqtt 
-psycopg2-binary
-sqlalchemy
-pydantic-settings
-requests
-httpx
+# Web
+fastapi==0.115.5
+uvicorn==0.32.0
+python-multipart==0.0.22
 
-psycopg[binary]
+# Base de datos (psycopg 3: driver sync + async)
+SQLAlchemy==2.0.44
+psycopg[binary]==3.3.3
+alembic==1.18.4
 
-asyncpg
-python-jose[cryptography]
-python-dotenv
-alembic
-pydantic[email]
+# Config / validación
+pydantic==2.12.4
+pydantic-settings==2.6.1
+python-dotenv==1.0.1
+email-validator==2.3.0
 
+# Seguridad
+python-jose[cryptography]==3.5.0
 passlib==1.7.4
 bcrypt==4.0.1
 
-python-multipart
+# Pronóstico (HTTP + scraping Ventusky)
+httpx==0.28.1
+beautifulsoup4==4.14.2

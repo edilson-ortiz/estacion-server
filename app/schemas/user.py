@@ -1,8 +1,6 @@
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, ConfigDict, EmailStr
 from typing import Optional
 from app.models.user import UserRole
-
-
 
 
 class UserCreate(BaseModel):
@@ -40,8 +38,7 @@ class UserResponse(BaseModel):
     activity: Optional[str] = None
     is_active: bool
 
-    class Config:
-        from_attributes = True  # Muy importante para poder pasar directamente objetos SQLAlchemy
+    model_config = ConfigDict(from_attributes=True)
 
 class ResetPasswordRequest(BaseModel):
     new_password: str

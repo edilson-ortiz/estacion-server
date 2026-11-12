@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from datetime import datetime
 
 class SensorDataBase(BaseModel):
@@ -15,5 +15,4 @@ class SensorDataBase(BaseModel):
 class SensorDataResponse(SensorDataBase):
     id: int
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)

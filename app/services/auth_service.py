@@ -1,22 +1,37 @@
+import uuid
+
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select,update
-from app.models.user import User
-from app.core.security import hash_password, verify_password
+
+from app.core.security import REFRESH, decode_token, hash_password, verify_password
+from app.models import User
 from app.schemas.user import UserCreate
+
 
 class AuthService:
 
     @staticmethod
-    async def get_user_by_email(db: AsyncSession, email: str):
-        result = await db.execute(select(User).where(User.email == email))
-        return result.scalar_one_or_none()
+    def new_session_id() -> str:
+        return str(uuid.uuid4())
+
     @staticmethod
-    async def get_user_by_number(db: AsyncSession, phone: str):
-        result = await db.execute(select(User).where(User.phone == phone))
+    async def get_user_by_id(db: AsyncSession, user_id: int) -> User | None:
+        return await db.get(User, user_id)
+
+    @staticmethod
+    async def get_user_by_email(db: AsyncSession, email: str) -> User | None:
+        result = await db.execute(select(User).where(User.email == email))
         return result.scalar_one_or_none()
 
     @staticmethod
-    async def create_user(db: AsyncSession, user_data: UserCreate, session_id: str):
+    async def phone_exists(db: AsyncSession, phone: str | None) -> bool:
+        if not phone:
+            return False
+        result = await db.execute(select(User.id).where(User.phone == phone).limit(1))
+        return result.first() is not None
+
+    @staticmethod
+    async def create_user(db: AsyncSession, user_data: UserCreate, session_id: str) -> User:
         user = User(
             email=user_data.email,
             hashed_password=hash_password(user_data.password),
@@ -26,7 +41,7 @@ class AuthService:
             role=user_data.role,
             activity=user_data.activity,
             terms_accepted=user_data.terms_accepted,
-            session_id=session_id
+            session_id=session_id,
         )
         db.add(user)
         await db.commit()
@@ -34,43 +49,32 @@ class AuthService:
         return user
 
     @staticmethod
-    async def authenticate(db: AsyncSession, email: str, password: str):
+    async def authenticate(db: AsyncSession, email: str, password: str) -> User | None:
         user = await AuthService.get_user_by_email(db, email)
-        if not user:
-            return None
-        if not verify_password(password, user.hashed_password):
+        if not user or not verify_password(password, user.hashed_password):
             return None
         return user
+
     @staticmethod
-    async def update_user(db: AsyncSession, user: User, **kwargs):
-        """
-        Actualiza campos de un usuario.
-        kwargs: los campos y valores a actualizar.
-        """
-        for key, value in kwargs.items():
-            if hasattr(user, key):
-                if key == "password":
-                    # Si quieres actualizar password desde kwargs
-                    setattr(user, "hashed_password", hash_password(value))
-                else:
-                    setattr(user, key, value)
+    async def update_user(db: AsyncSession, user: User, **fields) -> User:
+        """Actualiza campos del usuario. `password` se guarda hasheado."""
+        for key, value in fields.items():
+            if key == "password":
+                user.hashed_password = hash_password(value)
+            elif hasattr(user, key):
+                setattr(user, key, value)
         db.add(user)
         await db.commit()
         await db.refresh(user)
         return user
-    
+
     @staticmethod
-    async def update_session(db: AsyncSession, user_id: int,):
+    async def start_session(db: AsyncSession, user: User) -> str:
+        """Genera y guarda un session_id nuevo (invalida los tokens de otros dispositivos)."""
+        session_id = AuthService.new_session_id()
+        await AuthService.update_user(db, user, session_id=session_id)
+        return session_id
 
-        result = await db.execute(
-            select(User).where(User.id == user_id)
-        )
-
-        user = result.scalar_one_or_none()
-
-        if not user:
-            return None
-        await db.commit()
-        await db.refresh(user)
-
-        return user
+    @staticmethod
+    def decode_refresh_token(token: str) -> tuple[int, str | None]:
+        return decode_token(token, REFRESH)

@@ -1,39 +1,50 @@
-import sys
 import os
+import sys
 from logging.config import fileConfig
+
 from sqlalchemy import engine_from_config, pool
+
 from alembic import context
 
-# Permite importar app
+# Permite importar el paquete app
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from app.config import settings
-from app.database import Base
-from app.models import user,Estacion  # importa tus modelos
+import app.models  # noqa: E402,F401  (registra todos los modelos en Base.metadata)
+from app.core.config import settings  # noqa: E402
+from app.db.base import Base  # noqa: E402
 
-# Configuración de logging
 config = context.config
 fileConfig(config.config_file_name)
 
-# Metadata de SQLAlchemy
 target_metadata = Base.metadata
 
-# Función para ignorar tablas si quieres (opcional)
+# Tablas de la BD que Alembic debe ignorar (ej: tablas de otros servicios)
+IGNORE_TABLES: set[str] = set()
+
+
 def include_object(object, name, type_, reflected, compare_to):
-    ignore_tables = [
-    ]  # ejemplo: ['estacion', 'datos_sensores']
-    if type_ == "table" and name in ignore_tables:
-        return False
-    return True
+    return not (type_ == "table" and name in IGNORE_TABLES)
+
+
+def run_migrations_offline():
+    context.configure(
+        url=settings.DATABASE_URL,
+        target_metadata=target_metadata,
+        include_object=include_object,
+        literal_binds=True,
+        compare_type=True,
+    )
+    with context.begin_transaction():
+        context.run_migrations()
+
 
 def run_migrations_online():
     connectable = engine_from_config(
         config.get_section(config.config_ini_section),
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
-        url=settings.DATABASE_URL  # <- aquí usamos tu config
+        url=settings.DATABASE_URL,
     )
-
     with connectable.connect() as connection:
         context.configure(
             connection=connection,
@@ -41,8 +52,11 @@ def run_migrations_online():
             include_object=include_object,
             compare_type=True,
         )
-
         with context.begin_transaction():
             context.run_migrations()
 
-run_migrations_online()
+
+if context.is_offline_mode():
+    run_migrations_offline()
+else:
+    run_migrations_online()
