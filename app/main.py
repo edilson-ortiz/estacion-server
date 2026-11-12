@@ -1,22 +1,36 @@
-from fastapi import FastAPI
-from app.database import Base, engine
-from app.routers import auth, pronostico, weather_router,estacion
-from fastapi.exceptions import HTTPException
-from app.core.exception_handler import http_exception_handler
+from contextlib import asynccontextmanager
 
-app = FastAPI(title="Estación Meteorológica API")
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.api.router import api_router
+from app.core.config import settings
+from app.core.exceptions import http_exception_handler
+from app.core.http import close_http_client
+from app.db.session import engine
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    yield
+    # Cierre ordenado de conexiones al apagar
+    await close_http_client()
+    await engine.dispose()
+
+
+app = FastAPI(title=settings.APP_NAME, lifespan=lifespan)
+
+if settings.cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 app.add_exception_handler(HTTPException, http_exception_handler)
-
-async def init_models():
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
-# Incluir rutas HTTP
-app.include_router(auth.router)
-app.include_router(estacion.router)
-app.include_router(weather_router.router,prefix="/weather", tags=["Weather Data"])
-app.include_router(pronostico.router, prefix="/pronostico", tags=["Pronóstico"])
+app.include_router(api_router)
 
 
 @app.get("/")

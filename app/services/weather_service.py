@@ -1,8 +1,70 @@
+"""Consultas de datos meteorológicos de las estaciones.
+
+La lluvia en BD está en pulsos crudos; siempre se convierte a mm con el factor de
+calibración vigente (ver services/calibracion.py). Los agregados se calculan en SQL.
+"""
+from __future__ import annotations
+
+from collections.abc import Iterable
+from datetime import date, datetime, timedelta, timezone
+
+from sqlalchemy import DateTime, and_, cast, func, literal, select, true
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, extract, func, cast, Date
-from app.models.Estacion import SensorData, Estacion, CalibracionPluviometro
-from datetime import datetime, timedelta, timezone
-from bisect import bisect_right
+from sqlalchemy.orm import aliased
+
+from app.core.time import (
+    BOLIVIA_OFFSET,
+    BOLIVIA_TZ_NAME,
+    STATION_ACTIVE_WINDOW,
+    ensure_aware,
+    inicio_dia_bolivia,
+    utcnow,
+)
+from app.models import Estacion, SensorData
+from app.services.calibracion import Calibracion, load_calibracion, load_calibraciones
+
+_DIRECCIONES = ["N", "NE", "E", "SE", "S", "SO", "O", "NO"]
+
+
+def direccion_viento_texto(direccion_grados: float | None) -> str:
+    if direccion_grados is None:
+        return "N/A"
+    return _DIRECCIONES[round(direccion_grados / 45) % 8]
+
+
+def _punto_rocio(temperatura: float | None, humedad: float | None) -> float | None:
+    if temperatura is None or humedad is None:
+        return None
+    return round(temperatura - ((100 - humedad) / 5), 1)
+
+
+def _format_datos(
+    record: SensorData,
+    calibracion: Calibracion,
+    now: datetime,
+    acumulados: dict | None = None,
+) -> dict:
+    """Arma el bloque "datos" de una estación a partir de su último registro."""
+    lluvia = record.lluvia
+    datos = {
+        "id": record.id,
+        "temperatura": record.temperatura,
+        "humedad": record.humedad,
+        "punto_rocio": _punto_rocio(record.temperatura, record.humedad),
+        "lluvia": round(lluvia * calibracion.factor_en(record.fecha), 1) if lluvia is not None else None,
+    }
+    if acumulados:
+        datos.update(acumulados)
+    datos.update({
+        "velocidad_viento": record.velocidad_viento,
+        "direccion_viento": record.direccion_viento,
+        "direccion_viento_texto": direccion_viento_texto(record.direccion_viento),
+        "rafaga_viento": record.rafaga_viento,
+        "presion_barometrica": record.presion_barometrica,
+        "estado": now - record.fecha <= STATION_ACTIVE_WINDOW,
+        "fecha": record.fecha.isoformat(sep=" "),
+    })
+    return datos
 
 
 class WeatherService:
@@ -10,138 +72,77 @@ class WeatherService:
     def __init__(self, db: AsyncSession):
         self.db = db
 
-    # ─────────────────────────────────────────────────────────────
-    # Carga TODOS los factores de una estación de una sola query
-    # Retorna lista ordenada lista para búsqueda binaria en memoria
-    # ─────────────────────────────────────────────────────────────
-    async def _load_factores(self, sensor_id: str) -> list[tuple[datetime, float]]:
-        """
-        Retorna lista de (vigente_desde, factor_k) ordenada por fecha ASC.
-        Se usa con bisect para encontrar el factor vigente en O(log n).
-        """
-        result = await self.db.execute(
-            select(
-                CalibracionPluviometro.vigente_desde,
-                CalibracionPluviometro.factor_k
-            )
-            .where(CalibracionPluviometro.estacion_codigo == sensor_id)
-            .order_by(CalibracionPluviometro.vigente_desde.asc())
-        )
-        return result.all()  # [(vigente_desde, factor_k), ...]
-
-    def _factor_en_fecha(self, factores: list, fecha: datetime) -> float:
-        """
-        Búsqueda binaria en memoria: O(log n) en lugar de query a BD.
-        Retorna el factor_k vigente para la fecha dada.
-        """
-        if not factores:
-            return 0.1
-
-        fechas = [f[0] for f in factores]
-
-        # Asegurar timezone para comparar
-        if fecha.tzinfo is None:
-            fecha = fecha.replace(tzinfo=timezone.utc)
-
-        fechas_aware = [
-            f.replace(tzinfo=timezone.utc) if f.tzinfo is None else f
-            for f in fechas
-        ]
-
-        idx = bisect_right(fechas_aware, fecha) - 1
-
-        if idx < 0:
-            return 0.1  # fecha anterior a toda calibración, fallback
-
-        return factores[idx][1]
-
-    # ─────────────────────────────────────────────────────────────
-    # Factor vigente — para uso en métodos que solo necesitan 1 fecha
-    # ─────────────────────────────────────────────────────────────
-    async def _get_factor_k(self, sensor_id: str, fecha: datetime) -> float:
-        factores = await self._load_factores(sensor_id)
-        return self._factor_en_fecha(factores, fecha)
-
-    async def get_latest_record(self, sensor_id: str):
-
-        result = await self.db.execute(
-            select(Estacion).where(Estacion.codigo == sensor_id)
-        )
-        estacion = result.scalar_one_or_none()
-
-        if not estacion:
-            return None
-
+    # ------------------------------------------------------------------
+    # Helpers de consulta
+    # ------------------------------------------------------------------
+    async def _get_last_record(self, sensor_id: str) -> SensorData | None:
         result = await self.db.execute(
             select(SensorData)
-            .where(SensorData.sensor_id == estacion.codigo)
+            .where(SensorData.sensor_id == sensor_id)
             .order_by(SensorData.fecha.desc())
             .limit(1)
         )
-        record = result.scalar_one_or_none()
+        return result.scalar_one_or_none()
 
-        if not record:
-            datos = None
-            estacion_activa = False
-        else:
-            now = datetime.now(timezone.utc)
-            diferencia = now - record.fecha
-            estacion_activa = diferencia <= timedelta(hours=1)
+    async def _get_last_records(self, codigos: list[str]) -> dict[str, SensorData]:
+        """Último registro de cada estación en UNA consulta (LATERAL + índice sensor_id, fecha)."""
+        sub = (
+            select(SensorData)
+            .where(SensorData.sensor_id == Estacion.codigo)
+            .order_by(SensorData.fecha.desc())
+            .limit(1)
+            .lateral()
+        )
+        ultimo = aliased(SensorData, sub)
+        result = await self.db.execute(
+            select(ultimo)
+            .select_from(Estacion)
+            .join(sub, true())
+            .where(Estacion.codigo.in_(codigos))
+        )
+        return {r.sensor_id: r for r in result.scalars()}
 
-            # Una sola query para todos los factores
-            factores = await self._load_factores(sensor_id)
+    def _resumen_hoy_ayer(self, sensor_id: str, now: datetime, **extra_hoy):
+        """SELECT con la lluvia (cruda) de hoy y de ayer en hora Bolivia, más agregados extra de hoy.
 
-            BOLIVIA_OFFSET = timedelta(hours=4)
-            now_bolivia = now - BOLIVIA_OFFSET
-            inicio_dia_bolivia = datetime(
-                now_bolivia.year, now_bolivia.month, now_bolivia.day,
-                tzinfo=timezone.utc
-            ) + BOLIVIA_OFFSET
+        extra_hoy: nombre=func.max(...) etc.; se calculan solo sobre las filas de hoy.
+        """
+        inicio_hoy = inicio_dia_bolivia(now)
+        inicio_ayer = inicio_hoy - timedelta(days=1)
+        hoy = and_(SensorData.fecha >= inicio_hoy, SensorData.fecha <= now)
+        ayer = and_(SensorData.fecha >= inicio_ayer, SensorData.fecha < inicio_hoy)
+        stmt = select(
+            func.sum(SensorData.lluvia).filter(hoy).label("lluvia_hoy"),
+            func.sum(SensorData.lluvia).filter(ayer).label("lluvia_ayer"),
+            *(agg.filter(hoy).label(nombre) for nombre, agg in extra_hoy.items()),
+        ).where(
+            SensorData.sensor_id == sensor_id,
+            SensorData.fecha >= inicio_ayer,
+            SensorData.fecha <= now,
+        )
+        return stmt, inicio_ayer
 
-            factor_k = self._factor_en_fecha(factores, now)
+    # ------------------------------------------------------------------
+    # Último registro de una estación (con acumulados de hoy/ayer)
+    # ------------------------------------------------------------------
+    async def get_latest_record(self, sensor_id: str) -> dict | None:
+        result = await self.db.execute(select(Estacion).where(Estacion.codigo == sensor_id))
+        estacion = result.scalar_one_or_none()
+        if not estacion:
+            return None
 
-            result = await self.db.execute(
-                select(func.sum(SensorData.lluvia))
-                .where(
-                    SensorData.sensor_id == estacion.codigo,
-                    SensorData.fecha >= inicio_dia_bolivia,
-                    SensorData.fecha <= now
-                )
-            )
-            acumulado_hoy = (result.scalar() or 0.0) * factor_k
+        record = await self._get_last_record(sensor_id)
+        datos = None
+        if record:
+            now = utcnow()
+            calibracion = await load_calibracion(self.db, sensor_id)
+            stmt, inicio_ayer = self._resumen_hoy_ayer(sensor_id, now)
+            fila = (await self.db.execute(stmt)).one()
 
-            ayer_inicio = inicio_dia_bolivia - timedelta(days=1)
-            ayer_fin = inicio_dia_bolivia
-            factor_k_ayer = self._factor_en_fecha(factores, ayer_inicio)
-
-            result = await self.db.execute(
-                select(func.sum(SensorData.lluvia))
-                .where(
-                    SensorData.sensor_id == estacion.codigo,
-                    SensorData.fecha >= ayer_inicio,
-                    SensorData.fecha < ayer_fin
-                )
-            )
-            acumulado_ayer = (result.scalar() or 0.0) * factor_k_ayer
-
-            factor_k_record = self._factor_en_fecha(factores, record.fecha)
-
-            datos = {
-                "id": record.id,
-                "temperatura": record.temperatura,
-                "humedad": record.humedad,
-                "punto_rocio": round(record.temperatura - ((100 - record.humedad) / 5), 1),
-                "lluvia": round(record.lluvia * factor_k_record, 1),
-                "lluvia_hoy": round(acumulado_hoy, 1),
-                "lluvia_ayer": round(acumulado_ayer, 1),
-                "velocidad_viento": record.velocidad_viento,
-                "direccion_viento": record.direccion_viento,
-                "direccion_viento_texto": self.direccion_viento_texto(record.direccion_viento),
-                "rafaga_viento": record.rafaga_viento,
-                "presion_barometrica": record.presion_barometrica,
-                "estado": estacion_activa,
-                "fecha": record.fecha.isoformat(sep=' ')
-            }
+            datos = _format_datos(record, calibracion, now, {
+                "lluvia_hoy": round((fila.lluvia_hoy or 0.0) * calibracion.factor_en(now), 1),
+                "lluvia_ayer": round((fila.lluvia_ayer or 0.0) * calibracion.factor_en(inicio_ayer), 1),
+            })
 
         return {
             "codigo": estacion.codigo,
@@ -151,338 +152,189 @@ class WeatherService:
             "latitud": estacion.latitud,
             "longitud": estacion.longitud,
             "descripcion": estacion.descripcion,
-            "datos": datos
+            "datos": datos,
         }
 
-    def direccion_viento_texto(self, direccion_grados: float):
-        if direccion_grados is None:
-            return "N/A"
-        direcciones = ["N", "NE", "E", "SE", "S", "SO", "O", "NO"]
-        indice = round(direccion_grados / 45) % 8
-        return direcciones[indice]
+    # ------------------------------------------------------------------
+    # Último registro de varias estaciones (listado de estaciones)
+    # ------------------------------------------------------------------
+    async def get_latest_datos_many(self, codigos: Iterable[str]) -> dict[str, dict | None]:
+        """{codigo: datos | None}. Siempre 2 consultas, sin importar cuántas estaciones sean."""
+        codigos = list(set(codigos))
+        if not codigos:
+            return {}
+        records = await self._get_last_records(codigos)
+        calibraciones = await load_calibraciones(self.db, records.keys())
+        now = utcnow()
+        return {
+            codigo: _format_datos(records[codigo], calibraciones[codigo], now)
+            if codigo in records else None
+            for codigo in codigos
+        }
 
-    async def get_daily_summary(self, sensor_id: str, days: int = 30):
-
-        desde = datetime.now(timezone.utc) - timedelta(days=days)
+    # ------------------------------------------------------------------
+    # Resumen diario de los últimos N días
+    # ------------------------------------------------------------------
+    async def get_daily_summary(self, sensor_id: str, days: int = 30) -> list[dict]:
+        desde = utcnow() - timedelta(days=days)
+        calibracion = await load_calibracion(self.db, sensor_id)
+        dia = func.date(SensorData.fecha)
 
         result = await self.db.execute(
             select(
-                SensorData.fecha,
-                SensorData.temperatura,
-                SensorData.humedad,
-                SensorData.lluvia
-            ).where(
-                SensorData.sensor_id == sensor_id,
-                SensorData.fecha >= desde
+                dia.label("dia"),
+                func.sum(SensorData.lluvia * calibracion.factor_sql(SensorData.fecha)).label("total_lluvia"),
+                func.min(SensorData.temperatura).label("temp_min"),
+                func.max(SensorData.temperatura).label("temp_max"),
+                func.max(SensorData.humedad).label("humedad_max"),
             )
+            .where(SensorData.sensor_id == sensor_id, SensorData.fecha >= desde)
+            .group_by(dia)
+            .order_by(dia.desc())
         )
-        records = result.mappings().all()
-
-        if not records:
-            return []
-
-        # Una sola query de factores para todos los registros
-        factores = await self._load_factores(sensor_id)
-
-        resumen = {}
-        for r in records:
-            dia = r["fecha"].date()
-            factor_k = self._factor_en_fecha(factores, r["fecha"])
-
-            if dia not in resumen:
-                resumen[dia] = {
-                    "total_lluvia": 0,
-                    "temp_min": r["temperatura"],
-                    "temp_max": r["temperatura"],
-                    "humedad_max": r["humedad"]
-                }
-
-            resumen[dia]["total_lluvia"] += r["lluvia"] * factor_k
-            resumen[dia]["temp_min"] = min(resumen[dia]["temp_min"], r["temperatura"])
-            resumen[dia]["temp_max"] = max(resumen[dia]["temp_max"], r["temperatura"])
-            resumen[dia]["humedad_max"] = max(resumen[dia]["humedad_max"], r["humedad"])
-
         return [
             {
-                "dia": dia.isoformat(),
-                "total_lluvia": round(d["total_lluvia"], 2),
-                "temp_min": d["temp_min"],
-                "temp_max": d["temp_max"],
-                "humedad": d["humedad_max"]
+                "dia": r.dia.isoformat(),
+                "total_lluvia": round(r.total_lluvia or 0.0, 2),
+                "temp_min": r.temp_min,
+                "temp_max": r.temp_max,
+                "humedad": r.humedad_max,
             }
-            for dia, d in sorted(resumen.items(), reverse=True)
+            for r in result
         ]
 
-    async def get_monthly_daily_rain(self, sensor_id: str, year: int, month: int):
-
-        result = await self.db.execute(
-            select(SensorData.fecha, SensorData.lluvia)
-            .where(
-                SensorData.sensor_id == sensor_id,
-                extract("year", SensorData.fecha) == year,
-                extract("month", SensorData.fecha) == month
-            )
-            .order_by(SensorData.fecha)
-        )
-        rows = result.mappings().all()
-
-        if not rows:
+    # ------------------------------------------------------------------
+    # Lluvia diaria de un mes
+    # ------------------------------------------------------------------
+    async def get_monthly_daily_rain(self, sensor_id: str, year: int, month: int) -> list[dict]:
+        if not (1 <= month <= 12 and 1 <= year <= 9998):
             return []
+        desde = date(year, month, 1)
+        hasta = date(year + month // 12, month % 12 + 1, 1)
+        return await self._lluvia_por_dia(sensor_id, desde, hasta)
 
-        # Una sola query de factores
-        factores = await self._load_factores(sensor_id)
-
-        resumen = {}
-        for r in rows:
-            dia = r["fecha"].date()
-            factor_k = self._factor_en_fecha(factores, r["fecha"])
-            resumen[dia] = resumen.get(dia, 0.0) + r["lluvia"] * factor_k
-
-        return [
-            {
-                "fecha": dia.isoformat(),
-                "suma_lluvia": round(suma, 2)
-            }
-            for dia, suma in sorted(resumen.items())
-        ]
-
-    
-
-    async def get_year_daily_rain(self, sensor_id: str, year: int):
-        """
-        Optimizado:
-        - 1 query para los datos del año (agrupado por día en SQL)
-        - 1 query para todos los factores de calibración
-        - Búsqueda del factor en memoria con bisect O(log n)
-        - Sin loops de queries a BD
-        """
-        fecha_bolivia = func.timezone('America/La_Paz', SensorData.fecha)
-
-        # Query agrupada en SQL — trae solo 365 filas máximo
+    async def _lluvia_por_dia(self, sensor_id: str, desde: date, hasta: date) -> list[dict]:
+        """Lluvia diaria en [desde, hasta). Las fechas se interpretan en la zona horaria de la sesión de BD."""
+        calibracion = await load_calibracion(self.db, sensor_id)
+        dia = func.date(SensorData.fecha)
         result = await self.db.execute(
             select(
-                func.date(fecha_bolivia).label("dia"),
-                func.sum(SensorData.lluvia).label("suma_lluvia")
+                dia.label("dia"),
+                func.sum(SensorData.lluvia * calibracion.factor_sql(SensorData.fecha)).label("suma"),
             )
             .where(
                 SensorData.sensor_id == sensor_id,
-                extract("year", fecha_bolivia) == year
+                SensorData.fecha >= desde,
+                SensorData.fecha < hasta,
             )
-            .group_by(func.date(fecha_bolivia))
-            .order_by(func.date(fecha_bolivia))
+            .group_by(dia)
+            .order_by(dia)
+        )
+        return [{"fecha": r.dia.isoformat(), "suma_lluvia": round(r.suma or 0.0, 2)} for r in result]
+
+    # ------------------------------------------------------------------
+    # Lluvia diaria de un año (días en hora Bolivia)
+    # ------------------------------------------------------------------
+    async def get_year_daily_rain(self, sensor_id: str, year: int) -> list[dict]:
+        if not 1 <= year <= 9998:
+            return []
+
+        def inicio_anio_bolivia(y: int):
+            return func.timezone(BOLIVIA_TZ_NAME, cast(literal(datetime(y, 1, 1)), DateTime()))
+
+        dia = func.date(func.timezone(BOLIVIA_TZ_NAME, SensorData.fecha))
+        result = await self.db.execute(
+            select(dia.label("dia"), func.sum(SensorData.lluvia).label("suma_lluvia"))
+            .where(
+                SensorData.sensor_id == sensor_id,
+                SensorData.fecha >= inicio_anio_bolivia(year),
+                SensorData.fecha < inicio_anio_bolivia(year + 1),
+            )
+            .group_by(dia)
+            .order_by(dia)
         )
         rows = result.all()
-
         if not rows:
             return []
 
-        # Una sola query para todos los factores
-        factores = await self._load_factores(sensor_id)
-
+        calibracion = await load_calibracion(self.db, sensor_id)
         return [
             {
                 "fecha": r.dia.isoformat(),
-                # El día agrupado está en Bolivia, lo convertimos a UTC para buscar el factor
+                # Factor vigente al inicio del día (en UTC)
                 "suma_lluvia": round(
-                    float(r.suma_lluvia) * self._factor_en_fecha(
-                        factores,
-                        datetime(r.dia.year, r.dia.month, r.dia.day, tzinfo=timezone.utc)
-                    ),
-                    2
-                )
+                    float(r.suma_lluvia or 0.0)
+                    * calibracion.factor_en(datetime(r.dia.year, r.dia.month, r.dia.day, tzinfo=timezone.utc)),
+                    2,
+                ),
             }
             for r in rows
         ]
 
-    async def get_rain_sum_between_dates(self, sensor_id: str, start_date: datetime, end_date: datetime):
+    # ------------------------------------------------------------------
+    # Lluvia total entre dos fechas (inclusive)
+    # ------------------------------------------------------------------
+    async def get_rain_sum_between_dates(
+        self, sensor_id: str, start_date: datetime, end_date: datetime
+    ) -> float:
+        calibracion = await load_calibracion(self.db, sensor_id)
+        condiciones = [SensorData.sensor_id == sensor_id, SensorData.fecha >= start_date.date()]
+        if end_date.date() < date.max:
+            condiciones.append(SensorData.fecha < end_date.date() + timedelta(days=1))
 
         result = await self.db.execute(
-            select(SensorData.fecha, SensorData.lluvia)
-            .where(
-                SensorData.sensor_id == sensor_id,
-                cast(SensorData.fecha, Date) >= start_date.date(),
-                cast(SensorData.fecha, Date) <= end_date.date()
-            )
+            select(func.sum(SensorData.lluvia * calibracion.factor_sql(SensorData.fecha))).where(*condiciones)
         )
-        rows = result.mappings().all()
+        total = result.scalar()
+        return round(total, 2) if total is not None else 0.0
 
-        if not rows:
-            return 0.0
-
-        # Una sola query de factores
-        factores = await self._load_factores(sensor_id)
-
-        total = sum(r["lluvia"] * self._factor_en_fecha(factores, r["fecha"]) for r in rows)
-        return round(total, 2)
-    async def get_last_12h_rain(self, sensor_id: str):
-        """
-        Retorna:
-        - Precipitación acumulada de cada una de las últimas 12 horas (para gráfico)
-        - Acumulado de hoy y ayer
-        - Temperatura y humedad máxima/mínima del día (hora Bolivia)
-        """
-        now = datetime.now(timezone.utc)
-        desde = now - timedelta(hours=12)
-
-        result = await self.db.execute(
-            select(SensorData.fecha, SensorData.lluvia)
-            .where(
-                SensorData.sensor_id == sensor_id,
-                SensorData.fecha >= desde,
-                SensorData.fecha <= now
-            )
-            .order_by(SensorData.fecha)
-        )
-        rows = result.mappings().all()
-
-        # Una sola query de factores, reusada para todo el método
-        factores = await self._load_factores(sensor_id)
+    # ------------------------------------------------------------------
+    # Lluvia por hora de las últimas 12h + resumen del día
+    # ------------------------------------------------------------------
+    async def get_last_12h_rain(self, sensor_id: str) -> dict:
+        now = utcnow()
+        calibracion = await load_calibracion(self.db, sensor_id)
 
         # ---------------- Buckets por hora (gráfico 12h) ----------------
+        result = await self.db.execute(
+            select(SensorData.fecha, SensorData.lluvia).where(
+                SensorData.sensor_id == sensor_id,
+                SensorData.fecha >= now - timedelta(hours=12),
+                SensorData.fecha <= now,
+            )
+        )
         hora_actual = now.replace(minute=0, second=0, microsecond=0)
-        buckets = {
-            hora_actual - timedelta(hours=i): 0.0
-            for i in range(11, -1, -1)
-        }
+        buckets = {hora_actual - timedelta(hours=i): 0.0 for i in range(11, -1, -1)}
+        for fecha, lluvia in result:
+            fecha = ensure_aware(fecha)
+            hora = fecha.replace(minute=0, second=0, microsecond=0)
+            if hora in buckets and lluvia is not None:
+                buckets[hora] += lluvia * calibracion.factor_en(fecha)
 
-        for r in rows:
-            fecha = r["fecha"]
-            if fecha.tzinfo is None:
-                fecha = fecha.replace(tzinfo=timezone.utc)
-
-            hora_bucket = fecha.replace(minute=0, second=0, microsecond=0)
-
-            if hora_bucket in buckets:
-                factor_k = self._factor_en_fecha(factores, fecha)
-                buckets[hora_bucket] += r["lluvia"] * factor_k
-
-        BOLIVIA_OFFSET = timedelta(hours=4)
-
-        # ---------------- Límites del día actual y de ayer, en hora Bolivia ----------------
-        now_bolivia = now - BOLIVIA_OFFSET
-        inicio_dia_bolivia = datetime(
-            now_bolivia.year, now_bolivia.month, now_bolivia.day,
-            tzinfo=timezone.utc
-        ) + BOLIVIA_OFFSET
-
-        ayer_inicio = inicio_dia_bolivia - timedelta(days=1)
-        ayer_fin = inicio_dia_bolivia
-
-        # ---------------- Acumulado de lluvia hoy ----------------
-        factor_k_hoy = self._factor_en_fecha(factores, now)
-        result = await self.db.execute(
-            select(func.sum(SensorData.lluvia))
-            .where(
-                SensorData.sensor_id == sensor_id,
-                SensorData.fecha >= inicio_dia_bolivia,
-                SensorData.fecha <= now
-            )
+        # ---------------- Lluvia hoy/ayer + temp/humedad de hoy (1 consulta) ----------------
+        stmt, inicio_ayer = self._resumen_hoy_ayer(
+            sensor_id,
+            now,
+            temp_max=func.max(SensorData.temperatura),
+            temp_min=func.min(SensorData.temperatura),
+            humedad_max=func.max(SensorData.humedad),
+            humedad_min=func.min(SensorData.humedad),
         )
-        acumulado_hoy = (result.scalar() or 0.0) * factor_k_hoy
-
-        # ---------------- Acumulado de lluvia ayer ----------------
-        factor_k_ayer = self._factor_en_fecha(factores, ayer_inicio)
-        result = await self.db.execute(
-            select(func.sum(SensorData.lluvia))
-            .where(
-                SensorData.sensor_id == sensor_id,
-                SensorData.fecha >= ayer_inicio,
-                SensorData.fecha < ayer_fin
-            )
-        )
-        acumulado_ayer = (result.scalar() or 0.0) * factor_k_ayer
-
-        # ---------------- Temp y humedad max/min de HOY (mismo rango que la lluvia de hoy) ----------------
-        result_stats = await self.db.execute(
-            select(
-                func.max(SensorData.temperatura).label("temp_max"),
-                func.min(SensorData.temperatura).label("temp_min"),
-                func.max(SensorData.humedad).label("humedad_max"),
-                func.min(SensorData.humedad).label("humedad_min"),
-            )
-            .where(
-                SensorData.sensor_id == sensor_id,
-                SensorData.fecha >= inicio_dia_bolivia,
-                SensorData.fecha <= now
-            )
-        )
-        stats_dia = result_stats.one()
-
-        # ---------------- Armado del gráfico 12h ----------------
-        rain_12h = [
-            {
-                "hora": (hora - BOLIVIA_OFFSET).strftime("%H:00"),
-                "fecha_hora": (hora - BOLIVIA_OFFSET).isoformat(),
-                "lluvia": round(valor, 2)
-            }
-            for hora, valor in buckets.items()
-        ]
+        fila = (await self.db.execute(stmt)).one()
 
         return {
-            "rain_12h": rain_12h,
-            "acumulado_hoy": round(acumulado_hoy, 2),
-            "acumulado_ayer": round(acumulado_ayer, 2),
-            "temp_max": stats_dia.temp_max,
-            "temp_min": stats_dia.temp_min,
-            "humedad_max": stats_dia.humedad_max,
-            "humedad_min": stats_dia.humedad_min,
-        }
-
-    async def get_latest_record_pro(self, sensor_id: str):
-    
-            result = await self.db.execute(
-                select(Estacion).where(Estacion.codigo == sensor_id)
-            )
-            estacion = result.scalar_one_or_none()
-    
-            if not estacion:
-                return None
-    
-            result = await self.db.execute(
-                select(SensorData)
-                .where(SensorData.sensor_id == estacion.codigo)
-                .order_by(SensorData.fecha.desc())
-                .limit(1)
-            )
-            record = result.scalar_one_or_none()
-    
-            if not record:
-                datos = None
-                estacion_activa = False
-            else:
-                now = datetime.now(timezone.utc)
-                diferencia = now - record.fecha
-                estacion_activa = diferencia <= timedelta(hours=1)
-    
-                # Una sola query para todos los factores
-                factores = await self._load_factores(sensor_id)
-    
-                BOLIVIA_OFFSET = timedelta(hours=4)
-                now_bolivia = now - BOLIVIA_OFFSET
-                inicio_dia_bolivia = datetime(
-                    now_bolivia.year, now_bolivia.month, now_bolivia.day,
-                    tzinfo=timezone.utc
-                ) + BOLIVIA_OFFSET
-    
-    
-                factor_k_record = self._factor_en_fecha(factores, record.fecha)
-    
-                datos = {
-                    "id": record.id,
-                    "temperatura": record.temperatura,
-                    "humedad": record.humedad,
-                    "punto_rocio": round(record.temperatura - ((100 - record.humedad) / 5), 1),
-                    "lluvia": round(record.lluvia * factor_k_record, 1),
-                    "velocidad_viento": record.velocidad_viento,
-                    "direccion_viento": record.direccion_viento,
-                    "direccion_viento_texto": self.direccion_viento_texto(record.direccion_viento),
-                    "rafaga_viento": record.rafaga_viento,
-                    "presion_barometrica": record.presion_barometrica,
-                    "estado": estacion_activa,
-                    "fecha": record.fecha.isoformat(sep=' ')
+            "rain_12h": [
+                {
+                    "hora": (hora - BOLIVIA_OFFSET).strftime("%H:00"),
+                    "fecha_hora": (hora - BOLIVIA_OFFSET).isoformat(),
+                    "lluvia": round(valor, 2),
                 }
-    
-            return {
-                "datos": datos
-            }
-    
+                for hora, valor in buckets.items()
+            ],
+            "acumulado_hoy": round((fila.lluvia_hoy or 0.0) * calibracion.factor_en(now), 2),
+            "acumulado_ayer": round((fila.lluvia_ayer or 0.0) * calibracion.factor_en(inicio_ayer), 2),
+            "temp_max": fila.temp_max,
+            "temp_min": fila.temp_min,
+            "humedad_max": fila.humedad_max,
+            "humedad_min": fila.humedad_min,
+        }

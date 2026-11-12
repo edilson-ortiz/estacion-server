@@ -1,10 +1,7 @@
 
-
 # Python
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
 
 # Virtual env
 venv/
@@ -13,6 +10,7 @@ env/
 
 # Environment variables
 .env
+!.env.example
 
 # Logs
 *.log
@@ -21,12 +19,14 @@ env/
 .DS_Store
 Thumbs.db
 
-# VS Code
+# IDE
 .vscode/
+.idea/
 
 # Cache
 .pytest_cache/
 .mypy_cache/
+.ruff_cache/
 
 # Build
 dist/
