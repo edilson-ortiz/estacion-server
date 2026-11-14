@@ -4,7 +4,7 @@
 """
 from fastapi import APIRouter
 
-from app.api.routers import auth, estacion, pronostico, weather
+from app.api.routers import auth, estacion, pronostico, weather, webhooks
 
 api_router = APIRouter()
 
@@ -13,3 +13,6 @@ api_router.include_router(auth.router)
 api_router.include_router(estacion.router)
 api_router.include_router(weather.router, prefix="/weather", tags=["Weather Data"])
 api_router.include_router(pronostico.router, prefix="/pronostico", tags=["Pronóstico"])
+
+# Ingesta de datos (EMQX → API → BD)
+api_router.include_router(webhooks.router, prefix="/webhooks", tags=["Webhooks"])
