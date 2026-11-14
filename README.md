@@ -18,7 +18,8 @@ app/
 │       ├── auth.py          /auth/*
 │       ├── estacion.py      /api/stations/*
 │       ├── weather.py       /weather/*
-│       └── pronostico.py    /pronostico/*
+│       ├── pronostico.py    /pronostico/*
+│       └── webhooks.py      /webhooks/emqx (ingesta desde EMQX)
 ├── core/
 │   ├── config.py        # Settings (.env)
 │   ├── security.py      # Hash de contraseñas y JWT
@@ -35,6 +36,7 @@ app/
     ├── station_service.py
     ├── weather_service.py     # Consultas y agregados de datos de sensores
     ├── calibracion.py         # Factor del pluviómetro (pulsos → mm), en SQL y en memoria
+    ├── ingest_service.py      # Guarda lecturas que llegan por webhook de EMQX
     ├── forecast_service.py    # Pronóstico iagro360 (con caché)
     └── ventusky_service.py    # Pronóstico Ventusky por scraping (con caché)
 alembic/                 # Migraciones de BD
@@ -66,6 +68,30 @@ Documentación interactiva: http://localhost:8000/docs
 ```bash
 alembic revision --autogenerate -m "descripcion"   # tras cambiar un modelo
 alembic upgrade head
+```
+
+## Ingesta de datos (EMQX → webhook → BD)
+
+Las estaciones publican por MQTT en EMQX (topic `RT10/<codigo>`, payload
+`{"id":"EP061","t":29.7,"h":78.4,"r":0,"wd":..,"ws_avg":..,"ws_gust":..,"bar":..}`).
+Una regla de EMQX reenvía cada mensaje por HTTP a `POST /webhooks/emqx`, que lo guarda en
+`datos_sensores`:
+
+- Autenticación: header `X-Webhook-Token` = `EMQX_WEBHOOK_TOKEN` del `.env`.
+- Campos faltantes se guardan como 0 (mismo criterio que el cliente MQTT anterior).
+- `fecha` = hora en que el broker recibió el mensaje (`publish_received_at`).
+- Mensajes inválidos o de estaciones no registradas se ignoran (responde 200 y lo registra
+  en el log) para que EMQX no los reintente.
+
+Configuración en EMQX (Integration → Rules): SQL `SELECT * FROM "RT10/#"`, acción
+*HTTP Server*, método POST, URL `http://172.17.0.1:8000/webhooks/emqx`, header
+`X-Webhook-Token`, body vacío (envía el mensaje completo).
+
+## Pruebas
+
+```bash
+pip install -r requirements-dev.txt
+pytest
 ```
 
 ## Calibración del pluviómetro

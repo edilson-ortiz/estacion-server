@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     # Vacío = sin CORS (la app móvil no lo necesita).
     CORS_ORIGINS: str = ""
 
+    # ---------------- Webhook de EMQX (ingesta de datos de estaciones) ----------------
+    # EMQX debe enviar este valor en el header X-Webhook-Token. Vacío = webhook desactivado.
+    EMQX_WEBHOOK_TOKEN: str = ""
+
     # ---------------- Servicios externos ----------------
     HTTP_TIMEOUT_SECONDS: float = 30.0
     FORECAST_URL: str = "https://pronostico.iagro360.xyz/forecast/daytramo"
